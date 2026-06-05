@@ -1,0 +1,6 @@
+# Generated Prisma client — do not commit
+# Regenerate with: npm run prisma:generate
+/generated/
+
+# Migration lock files are committed intentionally
+# DO NOT add migrations/ here

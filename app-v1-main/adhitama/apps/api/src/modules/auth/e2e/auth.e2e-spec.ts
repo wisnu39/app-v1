@@ -1,0 +1,24 @@
+describe('Auth E2E pipeline', () => {
+  it.todo('login success');
+  it.todo('login invalid credentials');
+  it.todo('login brute-force lockout');
+  it.todo('refresh token success');
+  it.todo('refresh token replay rejection');
+  it.todo('logout session revocation');
+  it.todo('verify email success');
+  it.todo('expired verification token');
+  it.todo('reused verification token');
+  it.todo('resend invalidates old token');
+  it.todo('cross-tenant rejection');
+  it.todo('request reset success');
+  it.todo('reset success');
+  it.todo('expired reset token');
+  it.todo('reused reset token');
+  it.todo('reset invalidates sessions');
+  it.todo('resend invalidates previous reset token');
+  it.todo('force password change enforcement');
+  it.todo('unverified email route blocking');
+  it.todo('throttling enforcement');
+  it.todo('audit event emission');
+  it.todo('tenant isolation enforcement');
+});

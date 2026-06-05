@@ -1,0 +1,55 @@
+{
+  "compilerOptions": {
+    /* ─── Language & Environment ─────────────────────────── */
+    "target": "ES2021",
+    "lib": ["ES2021"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+
+    /* ─── Strict Mode — MANDATORY per CODING_STANDARDS.md ── */
+    "strict": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitAny": true,
+    "noImplicitThis": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": false,
+
+    /* ─── Emit ───────────────────────────────────────────── */
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "removeComments": false,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+
+    /* ─── Module Resolution ──────────────────────────────── */
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* ─── Path Aliases — sesuai FOLDER_STRUCTURE.md ─────── */
+    "baseUrl": "./src",
+    "paths": {
+      "@core/*": ["core/*"],
+      "@modules/*": ["modules/*"],
+      "@common/*": ["common/*"],
+      "@config/*": ["config/*"],
+      "@infrastructure/*": ["infrastructure/*"],
+      "@jobs/*": ["jobs/*"],
+      "@integrations/*": ["integrations/*"],
+      "@modules/*": ["modules/*"]
+    },
+
+    /* ─── Skip Checks ────────────────────────────────────── */
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "test"]
+}

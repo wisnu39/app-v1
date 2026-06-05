@@ -1,0 +1,498 @@
+// ============================================================
+// Adhitama Enterprise Rental ERP — Prisma Schema
+// Version: 1.0 — Phase 2.1.a (Auth Foundation)
+//
+// DATABASE_DESIGN.md compliance:
+//   - PostgreSQL datasource
+//   - UUID primary keys (cuid() as default)
+//   - Multi-tenant ready (tenantId on all business entities)
+//   - Soft delete support (deletedAt nullable)
+//   - Standard timestamps (createdAt, updatedAt)
+//   - Explicit onDelete behavior on all FK relations
+//   - Immutable records: AuditLog (no updatedAt)
+//
+// Phase model map:
+//   Phase 2 (Auth)       : Tenant, User, Role, Permission,
+//                          RolePermission, Session, AuditLog  ← active
+//   Phase 4 (Customer)   : Customer
+//   Phase 5 (Inventory)  : ItemCategory, Item, Warehouse,
+//                          Stock, StockMovement, StockTransfer,
+//                          StockOpname
+//   Phase 7 (Rental)     : Rental, RentalItem, RentalStatusLog
+//   Phase 8 (Invoice)    : Invoice, InvoiceItem, Payment
+//   Phase 9 (Operational): OperationalAssignment,
+//                          OperationalChecklist,
+//                          OperationalChecklistItem,
+//                          OperationalReport, OperationalExpense
+// ============================================================
+
+// ─── Generator ───────────────────────────────────────────────
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = []
+}
+
+// ─── Datasource ──────────────────────────────────────────────
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+/// Tenant lifecycle status.
+/// ACTIVE     — tenant is fully operational
+/// INACTIVE   — tenant provisioned but not yet activated
+/// SUSPENDED  — tenant access suspended by platform admin
+enum TenantStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+/// User account status.
+/// ACTIVE     — user can log in normally
+/// INACTIVE   — account not yet activated or deactivated
+/// SUSPENDED  — account suspended by admin; cannot log in
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+// ============================================================
+// MODELS — Foundation Layer
+// ============================================================
+
+// ─── Tenant ──────────────────────────────────────────────────
+
+/// Tenant — top-level isolation unit for SaaS architecture.
+///
+/// Every business entity in the system is scoped to a Tenant.
+/// Tenant deletion is NOT soft-delete — it is a platform-level
+/// operation handled outside normal CRUD flows.
+///
+/// Indexes:
+///   - slug: unique lookup for subdomain/SaaS routing
+model Tenant {
+  id        String       @id @default(cuid())
+  name      String
+  /// URL-safe unique identifier. Used for subdomain routing in SaaS mode.
+  /// Format: lowercase alphanumeric + hyphens only.
+  slug      String       @unique
+  status    TenantStatus @default(ACTIVE)
+  /// Arbitrary tenant-level config (timezone, currency, feature flags).
+  /// Must NOT be used for business logic — use dedicated fields instead.
+  metadata  Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ─── Relations ───────────────────────────────────────────
+  users                    User[]
+  roles                    Role[]
+  sessions                 Session[]
+  auditLogs                AuditLog[]
+  emailVerificationTokens  EmailVerificationToken[]
+  passwordResetTokens      PasswordResetToken[]
+
+  @@map("tenants")
+}
+
+// ─── Role ─────────────────────────────────────────────────────
+
+/// Role — RBAC role scoped to a tenant.
+///
+/// Roles are tenant-owned and assigned to users one-to-one in v1.
+/// Many-to-many user-role is deferred to Phase 3+.
+///
+/// createdById / updatedById are nullable user references.
+/// They are nullable because:
+///   1. System-seeded roles have no human creator.
+///   2. FK uses SetNull so audit trail survives user deletion.
+///
+/// Indexes:
+///   - (tenantId, name): unique role name per tenant
+///   - tenantId: list roles by tenant
+model Role {
+  id          String  @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  /// User who created this role. Nullable for system-seeded roles.
+  createdById String?
+  /// User who last updated this role. Nullable for system-seeded roles.
+  updatedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ─── Relations ───────────────────────────────────────────
+  tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  /// Creator reference. SetNull so role survives creator deletion.
+  createdBy User? @relation("RoleCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  /// Last updater reference. SetNull so role survives updater deletion.
+  updatedBy User? @relation("RoleUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  users           User[]
+  rolePermissions RolePermission[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("roles")
+}
+
+// ─── Permission ───────────────────────────────────────────────
+
+/// Permission — granular capability, system-level (not tenant-scoped).
+///
+/// Permissions are defined at the application level and seeded during
+/// deployment. Tenants cannot create custom permissions.
+///
+/// Key format convention: "{module}.{action}"
+/// Examples: "inventory.read", "rental.create", "invoice.finalize"
+///
+/// No tenantId — permissions are global to the platform.
+/// No updatedAt — permissions are effectively immutable once seeded.
+///   (Schema changes require a new migration + seed update.)
+///
+/// Indexes:
+///   - key: unique — primary lookup path
+///   - module: filter permissions by domain module
+model Permission {
+  id          String  @id @default(cuid())
+  /// Unique machine-readable key. Format: "{module}.{action}".
+  /// Examples: "inventory.read", "rental.create", "invoice.finalize"
+  key         String  @unique
+  description String?
+  /// Domain module this permission belongs to.
+  /// Examples: "inventory", "rental", "invoice", "payment"
+  module      String
+
+  createdAt DateTime @default(now())
+
+  // ─── Relations ───────────────────────────────────────────
+  rolePermissions RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+// ─── RolePermission ───────────────────────────────────────────
+
+/// RolePermission — explicit many-to-many join between Role and Permission.
+///
+/// Explicit join table (not implicit Prisma relation array) so we can
+/// add audit fields (grantedBy, grantedAt) in future phases without
+/// schema refactor.
+///
+/// Constraints:
+///   - (roleId, permissionId) unique — a permission cannot be granted
+///     to the same role twice.
+///
+/// onDelete behavior:
+///   - Role deleted → Cascade: role-permission grants are removed.
+///     Deleting a role implies removing all its grants.
+///   - Permission deleted → Cascade: grants for removed permissions
+///     are cleaned up. Permission deletion is a platform-level operation.
+model RolePermission {
+  id           String @id @default(cuid())
+  roleId       String
+  permissionId String
+
+  createdAt DateTime @default(now())
+
+  // ─── Relations ───────────────────────────────────────────
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// ─── User ─────────────────────────────────────────────────────
+
+/// User — system user / employee, scoped to a tenant.
+///
+/// Email uniqueness is per-tenant (not global). A user can exist in
+/// multiple tenants with the same email as separate User records.
+///
+/// passwordHash stores Argon2 hash — never plaintext.
+/// Raw password is NEVER stored anywhere in the system.
+///
+/// roleId is a direct FK (single role per user in v1).
+/// Multi-role support is deferred to Phase 3+.
+///
+/// NIP (Nomor Induk Pegawai) — employee identifier:
+///   - Employee : WAJIB memiliki NIP (enforced at service layer, not DB)
+///   - Owner    : boleh tanpa NIP (nullable)
+///   - Unique per tenant via @@unique([tenantId, nip])
+///   - NIP nullable at DB level — service layer enforces role-based rules
+///   - NIP generation logic deferred to service layer (Phase 3)
+///
+/// Login strategy (enforced at auth service — Phase 2):
+///   - Owner    : login via email only
+///   - Employee : login via email OR nip
+///   Schema provides both fields; routing is a service-layer concern.
+///
+/// Email verification (foundation only — OTP/token table deferred):
+///   - emailVerifiedAt null     = not yet verified
+///   - emailVerifiedAt non-null = verified at that timestamp
+///   - Full verification flow (OTP, email link) implemented in Phase 2
+///
+/// First login flow (logic deferred to auth service — Phase 2):
+///   - mustChangePassword default true on user creation
+///   - Admin creates user → system generates default password
+///   - User must change password before accessing the application
+///   - Set to false after first successful password change
+///
+/// Soft delete via deletedAt:
+///   - Deleted users are hidden from normal queries
+///   - Historical records (AuditLog, assignments) remain intact
+///   - Session FK uses Cascade; Role FK uses Restrict
+///
+/// Indexes:
+///   - (tenantId, email)     unique — primary email login lookup
+///   - (tenantId, nip)       unique — NIP login lookup for employees
+///   - tenantId              list users by tenant
+///   - roleId                find users by role
+///   - status                filter active/inactive users
+///   - deletedAt             exclude soft-deleted in queries
+///   - (tenantId, deletedAt) optimize tenant-scoped active user queries
+///   - (tenantId, nip)       NIP lookup scoped to tenant
+///   - emailVerifiedAt       filter verified/unverified users
+model User {
+  id           String     @id @default(cuid())
+  tenantId     String
+  roleId       String
+  name         String
+  email        String
+  /// Argon2 hashed password. Never store or log the raw value.
+  passwordHash       String
+  status             UserStatus @default(ACTIVE)
+  avatarUrl          String?
+  /// Updated on each successful login. Null means never logged in.
+  lastLoginAt        DateTime?
+
+  // ─── Employee Identity ──────────────────────────────────
+  /// Nomor Induk Pegawai. Nullable at DB level.
+  /// Service layer enforces: employee role MUST have NIP, owner MAY omit.
+  /// NIP generation is handled by service layer (Phase 3).
+  /// Unique per tenant via @@unique([tenantId, nip]).
+  nip                String?
+  /// Employee address. Optional, used for HR / operational records.
+  address            String?
+  /// Primary contact number (phone / WhatsApp). Optional.
+  contact            String?
+
+  // ─── Verification & Security ────────────────────────────
+  /// Timestamp of email verification. Null = not yet verified.
+  /// Full verification flow (OTP / email link) implemented in Phase 2.
+  emailVerifiedAt    DateTime?
+  /// When true, user must change password before accessing the app.
+  /// Defaults to true — set false after first successful password change.
+  /// Logic enforced at auth service layer (Phase 2).
+  mustChangePassword Boolean   @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  /// Soft delete timestamp. Non-null = logically deleted.
+  deletedAt DateTime?
+
+  // ─── Relations ─────────────────────────────────────────
+  /// Restrict: tenant cannot be deleted while users exist.
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  /// Restrict: role cannot be deleted while users are assigned to it.
+  role Role @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  sessions                 Session[]
+  auditLogs                AuditLog[] @relation("AuditLogActor")
+  emailVerificationTokens  EmailVerificationToken[]
+  passwordResetTokens      PasswordResetToken[]
+
+  /// Back-references for Role audit trail fields
+  rolesCreated Role[]     @relation("RoleCreatedBy")
+  rolesUpdated Role[]     @relation("RoleUpdatedBy")
+
+  @@unique([tenantId, email])
+  @@unique([tenantId, nip])
+  @@index([tenantId])
+  @@index([roleId])
+  @@index([status])
+  @@index([deletedAt])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, nip])
+  @@index([emailVerifiedAt])
+  @@map("users")
+}
+
+/// EmailVerificationToken — one-time secure token for email verification.
+/// Raw tokens are NEVER persisted.
+/// Token hashes are compared using constant-time semantics in service layer.
+model EmailVerificationToken {
+  id         String   @id @default(cuid())
+  tenantId   String
+  userId     String
+  tokenHash  String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@index([tokenHash])
+  @@map("email_verification_tokens")
+}
+
+/// PasswordResetToken — one-time secure token for password reset.
+model PasswordResetToken {
+  id         String   @id @default(cuid())
+  tenantId   String
+  userId     String
+  tokenHash  String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@index([tokenHash])
+  @@map("password_reset_tokens")
+}
+
+// ─── Session ──────────────────────────────────────────────────
+
+/// Session — multi-device refresh token session.
+///
+/// One session per device login. A user can have multiple concurrent
+/// sessions (multi-device support).
+///
+/// Security rules (SECURITY_DESIGN.md):
+///   - refreshTokenHash stores hashed token only — never raw token.
+///   - revokedAt is set on logout or admin force-revoke.
+///   - Expired + revoked sessions are candidates for cleanup jobs.
+///
+/// onDelete behavior:
+///   - Tenant deleted → Cascade: all tenant sessions cleaned up.
+///   - User deleted → Cascade: user's sessions are invalidated.
+///     (User deletion implies loss of all active sessions.)
+///
+/// Indexes:
+///   - (tenantId, userId): find all sessions for a user
+///   - userId: fast session lookup on token refresh
+///   - expiresAt: cleanup queries for expired sessions
+///   - revokedAt: filter active (non-revoked) sessions
+model Session {
+  id               String    @id @default(cuid())
+  tenantId         String
+  userId           String
+  /// Argon2/bcrypt hash of the refresh token — never the raw token.
+  refreshTokenHash String
+  /// Human-readable device info (parsed User-Agent or app-provided label).
+  deviceInfo       String?
+  ipAddress        String?
+  userAgent        String?
+  /// Session expiry — compared against current time on each token refresh.
+  expiresAt        DateTime
+  /// Set on explicit logout or admin revocation. Null = still active.
+  revokedAt        DateTime?
+
+  createdAt DateTime @default(now())
+
+  // ─── Relations ───────────────────────────────────────────
+  /// Cascade: deleting a tenant removes all its sessions.
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Cascade: deleting a user removes all their sessions.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+  @@map("sessions")
+}
+
+// ─── AuditLog ─────────────────────────────────────────────────
+
+/// AuditLog — immutable audit trail for all significant system events.
+///
+/// Append-only: records are NEVER updated or deleted.
+/// No updatedAt — immutability is enforced by convention and service layer.
+///
+/// actorUserId is nullable for system-generated events:
+///   - Scheduled jobs
+///   - Migration scripts
+///   - System bootstrapping
+///
+/// onDelete behavior:
+///   - Tenant deleted → Restrict: audit trail must be preserved.
+///     Tenant deletion requires manual audit log archival first.
+///   - User (actor) deleted → SetNull: log entry is preserved but
+///     actor reference is nulled. The action is still traceable via
+///     entityType + entityId + timestamp.
+///
+/// before/after/metadata use Json? (nullable):
+///   - before: state snapshot before change (null for CREATE events)
+///   - after:  state snapshot after change  (null for DELETE events)
+///   - metadata: arbitrary context (requestId, correlationId, etc.)
+///   Sensitive fields (passwordHash, tokens) MUST be redacted before
+///   storing in before/after — enforced at service layer.
+///
+/// Indexes:
+///   - tenantId: all audit logs for a tenant
+///   - actorUserId: all actions by a specific user
+///   - (entityType, entityId): all events for a specific entity
+///   - (tenantId, createdAt): time-range audit queries (most common)
+model AuditLog {
+  id          String  @id @default(cuid())
+  tenantId    String
+  /// Null for system-generated events (jobs, migrations, bootstrapping).
+  actorUserId String?
+  /// Action performed. Convention: SCREAMING_SNAKE_CASE verb.
+  /// Examples: "LOGIN", "LOGOUT", "CREATE", "UPDATE", "DELETE",
+  ///           "STOCK_RESERVED", "INVOICE_FINALIZED", "PAYMENT_POSTED"
+  action      String
+  /// Type of entity affected. Matches Prisma model name.
+  /// Examples: "User", "Rental", "Invoice", "StockMovement"
+  entityType  String
+  /// ID of the affected entity. String to support any ID type.
+  entityId    String
+  /// State before the action. Null for CREATE events.
+  /// MUST have sensitive fields redacted before storage.
+  before      Json?
+  /// State after the action. Null for DELETE events.
+  /// MUST have sensitive fields redacted before storage.
+  after       Json?
+  /// Additional context: requestId, correlationId, feature flags, etc.
+  metadata    Json?
+  ipAddress   String?
+  userAgent   String?
+
+  createdAt DateTime @default(now())
+
+  // ─── Relations ───────────────────────────────────────────
+  /// Restrict: audit trail must survive tenant lifecycle events.
+  /// Tenant deletion requires archival, not cascade delete.
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  /// SetNull: actor reference is nulled when user is deleted,
+  /// but the audit log entry is fully preserved for traceability.
+  actor User? @relation("AuditLogActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([actorUserId])
+  @@index([entityType, entityId])
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}

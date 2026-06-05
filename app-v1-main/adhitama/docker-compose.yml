@@ -1,0 +1,105 @@
+# ============================================================
+# Adhitama Enterprise Rental ERP — Docker Compose
+# Infrastructure: PostgreSQL + Redis
+#
+# Usage:
+#   cp .env.docker.example .env.docker
+#   docker compose --env-file .env.docker up -d
+#
+# Phase 1 scope: infrastructure only (no API container yet)
+# API container will be added in Phase 1 — Task 2.3
+# ============================================================
+
+services:
+
+  # ─── PostgreSQL ────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: adhitama-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: UTC
+
+    ports:
+      # Expose to localhost only — not public interface
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+    volumes:
+      # Persistent data volume
+      - adhitama-postgres-data:/var/lib/postgresql/data
+      # Initialization scripts (run once on first start)
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    networks:
+      - adhitama-network
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─── Redis ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: adhitama-redis
+    restart: unless-stopped
+
+    # Inject password via command to avoid plaintext in redis.conf
+    command: >
+      redis-server /usr/local/etc/redis/redis.conf
+      --requirepass ${REDIS_PASSWORD}
+
+    ports:
+      # Expose to localhost only — not public interface
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+
+    volumes:
+      # Persistent data volume
+      - adhitama-redis-data:/data
+      # Custom Redis config (read-only mount)
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+    networks:
+      - adhitama-network
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ─── Volumes ───────────────────────────────────────────────────
+volumes:
+  adhitama-postgres-data:
+    name: adhitama-postgres-data
+    driver: local
+
+  adhitama-redis-data:
+    name: adhitama-redis-data
+    driver: local
+
+# ─── Networks ──────────────────────────────────────────────────
+networks:
+  adhitama-network:
+    name: adhitama-network
+    driver: bridge
